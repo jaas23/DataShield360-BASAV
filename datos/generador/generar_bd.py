@@ -12,13 +12,14 @@ import random
 import sys
 from datetime import date, datetime, timedelta, time
 from decimal import Decimal, ROUND_HALF_UP
+from itertools import accumulate
 
 SEMILLA = 2026
 rng = random.Random(SEMILLA)
 
 FECHA_INI = date(2024, 1, 1)
 FECHA_FIN = date(2026, 10, 31)          # corte de datos
-VENTAS_OBJETIVO = 40000                 # aprox. cabeceras de venta
+VENTAS_OBJETIVO = 360000                # aprox. cabeceras de venta (pedidos de reposición semanales)
 IGV = Decimal("0.18")
 
 def d2(x):
@@ -222,12 +223,12 @@ FLOTA = {s: [placa() for _ in range(len(CHOFERES[s]))] for s in (1, 2, 3)}
 
 # ---- Clientes ----
 TIPOS_CLIENTE = [  # tipo, prob, rango_cantidad, descuento_pct, frecuencia_relativa
-    ("Bodega", 0.45, (2, 12), 0, 1.0),
-    ("Minimarket", 0.20, (4, 24), 0, 1.6),
-    ("Restaurante", 0.10, (3, 15), 0, 1.2),
-    ("Persona natural", 0.15, (1, 3), 0, 0.4),
-    ("Supermercado", 0.04, (12, 60), 3, 3.0),
-    ("Mayorista", 0.06, (24, 120), 5, 3.5),
+    ("Bodega", 0.45, (4, 14), 0, 1.0),         # cantidades por línea de un pedido de reposición
+    ("Minimarket", 0.20, (8, 24), 0, 1.6),
+    ("Restaurante", 0.10, (4, 16), 0, 1.2),
+    ("Persona natural", 0.15, (2, 6), 0, 0.4),
+    ("Supermercado", 0.04, (12, 40), 3, 2.0),   # pedidos grandes, menos frecuentes
+    ("Mayorista", 0.06, (24, 72), 5, 2.0),
 ]
 TIPO_INFO = {t[0]: t for t in TIPOS_CLIENTE}
 CLIENTES_POR_SUC = {1: 1200, 2: 600, 3: 600}
@@ -306,6 +307,11 @@ def peso_producto(pid, mes):
     return p[6] * factor_categoria(p[0], mes)
 
 PRODUCTO_IDS = list(range(1, len(PRODUCTOS) + 1))
+_cache_prod = {}
+def cum_prod(mes):
+    if mes not in _cache_prod:
+        _cache_prod[mes] = list(accumulate(peso_producto(p, mes) for p in PRODUCTO_IDS))
+    return _cache_prod[mes]
 
 # total de "intensidad" para calibrar el volumen diario
 dias = []
@@ -333,7 +339,7 @@ def elegibles(suc, d):
     if key not in cache_elegibles:
         ini_mes = date(d.year, d.month, 1)
         lst = [c for c in CLIENTES if c[5] == suc and c[10] <= ini_mes]
-        cache_elegibles[key] = (lst, [c[11] for c in lst])
+        cache_elegibles[key] = (lst, list(accumulate(c[11] for c in lst)))   # pesos acumulados (más rápido)
     return cache_elegibles[key]
 
 for dia in dias:
@@ -342,7 +348,7 @@ for dia in dias:
     for _ in range(n_ventas):
         suc = rng.choices([1, 2, 3], [s[8] for s in SUCURSALES])[0]
         lst, pesos = elegibles(suc, dia)
-        cli = rng.choices(lst, pesos)[0]
+        cli = rng.choices(lst, cum_weights=pesos)[0]
         tipo = cli[4]
         _, _, (qmin, qmax), desc_base, _ = TIPO_INFO[tipo]
         vend = rng.choice(VENDEDORES[suc])
@@ -357,10 +363,10 @@ for dia in dias:
         n_items = min(len(PRODUCTO_IDS), 1 + int(rng.expovariate(1 / (2.2 if tipo != "Persona natural" else 0.8))))
         if tipo in ("Supermercado", "Mayorista"):
             n_items = min(len(PRODUCTO_IDS), n_items + rng.randint(3, 8))
-        pw = [peso_producto(p, dia.month) for p in PRODUCTO_IDS]
+        pw = cum_prod(dia.month)
         elegidos = set()
         while len(elegidos) < n_items:
-            elegidos.add(rng.choices(PRODUCTO_IDS, pw)[0])
+            elegidos.add(rng.choices(PRODUCTO_IDS, cum_weights=pw)[0])
         vid += 1
         subtotal = Decimal("0.00")
         for pid in sorted(elegidos):
@@ -402,12 +408,22 @@ for dia in dias:
 # ---------------------------------------------------------------------------
 # 3. Inventario (foto al corte)
 # ---------------------------------------------------------------------------
+# Stock mínimo = 7 días de venta promedio (ago-oct 2026) de ese producto en esa sede;
+# stock máximo = 30 días. Así el inventario es coherente con el volumen de ventas.
+from collections import defaultdict
+_venta_suc = {v[0]: v[7] for v in VENTAS if v[4] >= datetime(2026, 8, 1) and v[12] == "EMITIDA"}
+_unidades = defaultdict(int)
+for d_ in DETALLES:
+    suc_ = _venta_suc.get(d_[1])
+    if suc_:
+        _unidades[(suc_, d_[2])] += d_[3]
+DIAS_VENTANA = (date(2026, 10, 31) - date(2026, 8, 1)).days + 1
 INVENTARIO = []
 for s in SUCURSALES:
     for pid in PRODUCTO_IDS:
-        pop = PRODUCTOS[pid - 1][6] or 1
-        minimo = int(pop * 40 * (2 if s[0] == 1 else 1))
-        maximo = minimo * 6
+        diario = _unidades[(s[0], pid)] / DIAS_VENTANA
+        minimo = max(10, int(round(diario * 7)))
+        maximo = max(minimo * 2, int(round(diario * 30)))
         if rng.random() < 0.10:
             actual = rng.randint(0, max(1, minimo - 1))          # bajo stock -> alertas
         else:
@@ -454,9 +470,11 @@ DDL = r"""/* ===================================================================
    - Datos 100 % ficticios generados con Python (semilla fija 2026,
      reproducible con generador/generar_bd.py).
    - Periodo de ventas: 2024-01-01 al 2026-10-31.
+   - Volumen: ~2 millones de filas (pedidos de reposición semanales).
    - Compatible con SQL Server 2016 o superior.
-   - Ejecución recomendada (más rápida que SSMS para archivos grandes):
+   - El archivo es grande: SSMS no puede abrirlo. Ejecutar con sqlcmd:
        sqlcmd -S localhost -E -f 65001 -i 01_DistribuidoraAndina_BD.sql
+     (la carga tarda varios minutos)
    ===================================================================== */
 SET NOCOUNT ON;
 USE master;
@@ -472,8 +490,9 @@ GO
 
 CREATE DATABASE DistribuidoraAndina;
 GO
--- Modelo de recuperación FULL: necesario para backups de log (paso 3)
-ALTER DATABASE DistribuidoraAndina SET RECOVERY FULL;
+-- Durante la carga masiva se usa SIMPLE (registra menos en el log y es más rápido).
+-- Al final del script se cambia a FULL, necesario para los backups de log (paso 3).
+ALTER DATABASE DistribuidoraAndina SET RECOVERY SIMPLE;
 GO
 
 USE DistribuidoraAndina;
@@ -660,6 +679,15 @@ inserts(out, "dbo.DetalleVenta", ["DetalleID", "VentaID", "ProductoID", "Cantida
 inserts(out, "dbo.Despacho", ["DespachoID", "VentaID", "ChoferID", "PlacaVehiculo", "FechaProgramada", "FechaSalida",
                               "FechaEntrega", "Estado", "DireccionEntrega"], DESPACHOS)
 
+out.append(r"""
+/* ------------------ MODELO DE RECUPERACIÓN FINAL -------------------- */
+USE master;
+GO
+ALTER DATABASE DistribuidoraAndina SET RECOVERY FULL;
+GO
+USE DistribuidoraAndina;
+GO
+""")
 out.append(r"""
 /* --------------------------- VERIFICACIÓN --------------------------- */
 SELECT 'Sucursal' AS Tabla, COUNT(*) AS Filas FROM dbo.Sucursal UNION ALL

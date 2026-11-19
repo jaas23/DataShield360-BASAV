@@ -12,14 +12,14 @@ GO
 
 /* =========================== 0. CONTEXTO ============================ */
 
--- Comprobantes, ventas y ticket promedio 2025 (solo EMITIDAS): 14 186 / 13 126 099 / 925.29
+-- Comprobantes, ventas y ticket promedio 2025 (solo EMITIDAS): 128 597 / 69 493 784.02 / 540.40
 SELECT COUNT(*)   AS Comprobantes2025,
        SUM(Total) AS Ventas2025,
        AVG(Total) AS TicketPromedio2025
 FROM dbo.Venta
 WHERE Estado = 'EMITIDA' AND YEAR(FechaVenta) = 2025;
 
--- Crecimiento anual (2025 vs 2024 = +19.6 %).
+-- Crecimiento anual (2025 vs 2024 = +15.5 %).
 -- OJO: 2026 sale negativo porque solo tiene enero-octubre (año incompleto).
 WITH A AS (
     SELECT YEAR(FechaVenta) AS Anio, SUM(Total) AS Ventas
@@ -30,7 +30,7 @@ SELECT Anio, Ventas,
             / LAG(Ventas) OVER (ORDER BY Anio) AS DECIMAL(6,1)) AS CrecimientoPct
 FROM A ORDER BY Anio;
 
--- Crecimiento con periodos equivalentes: ene-oct 2026 vs ene-oct 2025 (+15.0 %)
+-- Crecimiento con periodos equivalentes: ene-oct 2026 vs ene-oct 2025 (+12.9 %)
 WITH A AS (
     SELECT YEAR(FechaVenta) AS Anio, SUM(Total) AS Ventas
     FROM dbo.Venta
@@ -42,7 +42,7 @@ SELECT MAX(CASE WHEN Anio = 2025 THEN Ventas END) AS EneOct2025,
                    / MAX(CASE WHEN Anio = 2025 THEN Ventas END) - 1) AS DECIMAL(6,1)) AS CrecimientoPct
 FROM A;
 
--- Participación por sede (Lima 51.1 / Arequipa 27.4 / Trujillo 21.5)
+-- Participación por sede (Lima 51.1 / Arequipa 26.7 / Trujillo 22.2)
 SELECT s.Ciudad,
        SUM(v.Total) AS Ventas,
        CAST(100.0 * SUM(v.Total) / SUM(SUM(v.Total)) OVER () AS DECIMAL(5,1)) AS ParticipacionPct
@@ -52,12 +52,35 @@ WHERE v.Estado = 'EMITIDA'
 GROUP BY s.Ciudad
 ORDER BY Ventas DESC;
 
--- Estacionalidad 2025 (diciembre 1.83 M vs febrero 0.76 M = 2.4 veces)
+-- Estacionalidad 2025 (diciembre 8.92 M vs febrero 4.20 M = 2.1 veces)
 SELECT MONTH(FechaVenta) AS Mes, COUNT(*) AS Comprobantes, SUM(Total) AS Ventas
 FROM dbo.Venta
 WHERE Estado = 'EMITIDA' AND YEAR(FechaVenta) = 2025
 GROUP BY MONTH(FechaVenta)
 ORDER BY Mes;
+
+-- Usuarios operativos por cargo y sede (total 55: 26 vendedores, 14 choferes,
+-- 8 almaceneros, 4 supervisores, 3 administradores de sede)
+SELECT e.Cargo,
+       SUM(CASE WHEN s.Ciudad = 'Lima'     THEN 1 ELSE 0 END) AS Lima,
+       SUM(CASE WHEN s.Ciudad = 'Arequipa' THEN 1 ELSE 0 END) AS Arequipa,
+       SUM(CASE WHEN s.Ciudad = 'Trujillo' THEN 1 ELSE 0 END) AS Trujillo,
+       COUNT(*) AS Total
+FROM dbo.Empleado e
+JOIN dbo.Sucursal s ON s.SucursalID = e.SucursalID
+GROUP BY e.Cargo
+ORDER BY Total DESC;
+
+-- Titulares de datos personales (Ley N.° 29733 protege a personas naturales):
+-- 1 114 clientes personas naturales (368 DNI + 746 RUC 10) y 55 colaboradores.
+-- Los 1 286 clientes con RUC 20 son empresas (personas jurídicas).
+SELECT SUM(CASE WHEN TipoDocumento = 'DNI' THEN 1 ELSE 0 END)                               AS ClientesConDNI,
+       SUM(CASE WHEN TipoDocumento = 'RUC' AND NumeroDocumento LIKE '10%' THEN 1 ELSE 0 END) AS ClientesRUC10,
+       SUM(CASE WHEN TipoDocumento = 'DNI'
+                 OR (TipoDocumento = 'RUC' AND NumeroDocumento LIKE '10%') THEN 1 ELSE 0 END) AS ClientesPersonasNaturales,
+       SUM(CASE WHEN TipoDocumento = 'RUC' AND NumeroDocumento LIKE '20%' THEN 1 ELSE 0 END) AS ClientesEmpresas,
+       (SELECT COUNT(*) FROM dbo.Empleado)                                                    AS Colaboradores
+FROM dbo.Cliente;
 
 /* =========================== 1. INTEGRIDAD ========================== */
 
@@ -97,7 +120,7 @@ SELECT COUNT(*) AS Clientes,
        CAST(100.0 * SUM(CASE WHEN Telefono IS NULL THEN 1 ELSE 0 END) / COUNT(*) AS DECIMAL(5,1)) AS PctSinTelefono
 FROM dbo.Cliente;
 
--- [DP] Comprobantes anulados: 580 (1.45 %)
+-- [DP] Comprobantes anulados: 5 258 (1.46 %)
 SELECT COUNT(*) AS Comprobantes,
        SUM(CASE WHEN Estado = 'ANULADA' THEN 1 ELSE 0 END) AS Anulados,
        CAST(100.0 * SUM(CASE WHEN Estado = 'ANULADA' THEN 1 ELSE 0 END) / COUNT(*) AS DECIMAL(5,2)) AS PctAnulados
@@ -177,7 +200,7 @@ SET STATISTICS TIME OFF;
 
 /* ======================= 5. VOLUMEN Y VARIEDAD ====================== */
 
--- [DP] Filas transaccionales acumuladas: 235 872
+-- [DP] Filas transaccionales acumuladas: 1 956 687 (DetalleVenta: 1 251 129)
 SELECT (SELECT COUNT(*) FROM dbo.Venta)
      + (SELECT COUNT(*) FROM dbo.DetalleVenta)
      + (SELECT COUNT(*) FROM dbo.Despacho)
@@ -186,7 +209,7 @@ SELECT (SELECT COUNT(*) FROM dbo.Venta)
 
 /* ===================== 6. CONSECUENCIAS OPERATIVAS ================== */
 
--- [DP] Despachos entregados a tiempo: 84.95 % de 37 926
+-- [DP] Despachos entregados a tiempo: 84.89 % de 340 702
 SELECT COUNT(*) AS Entregados,
        SUM(CASE WHEN CAST(FechaEntrega AS DATE) <= FechaProgramada THEN 1 ELSE 0 END) AS ATiempo,
        CAST(100.0 * SUM(CASE WHEN CAST(FechaEntrega AS DATE) <= FechaProgramada THEN 1 ELSE 0 END)
@@ -194,7 +217,7 @@ SELECT COUNT(*) AS Entregados,
 FROM dbo.Despacho
 WHERE Estado = 'ENTREGADO';
 
--- [DP] Posiciones de inventario (sede + producto) bajo el stock mínimo: 23 de 198
+-- [DP] Posiciones de inventario (sede + producto) bajo el stock mínimo: 26 de 198
 SELECT COUNT(*) AS Posiciones,
        SUM(CASE WHEN StockActual < StockMinimo THEN 1 ELSE 0 END) AS BajoMinimo
 FROM dbo.Inventario;
